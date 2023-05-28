@@ -86,7 +86,6 @@ abstract class BeaconAbstractModule extends CoreModule
         }
 
         $hashes = requester_multi_process($curl_results[0]);
-        // print_r($hashes);
         ksort($hashes, SORT_STRING);
 
         if(array_key_exists("data", $hashes)) {

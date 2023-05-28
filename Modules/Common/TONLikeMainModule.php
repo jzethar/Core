@@ -48,8 +48,7 @@ abstract class TONLikeMainModule extends CoreModule
 
     public function inquire_latest_block()
     {
-        $result = requester_single($this->select_node(), endpoint: 'lastNum', timeout: $this->timeout);
-
+        $result = requester_single($this->select_node(), endpoint: 'lastNumDB', timeout: $this->timeout);
         return (int)$result[($this->workchain)][(array_key_first($result[($this->workchain)]))]['seqno'];
         // This may be not the best solution in case there are several shard with different heights
     }

@@ -183,3 +183,140 @@ function remove_passwords($url)
     $url = parse_url($url);
     return ($url['scheme'] ?? '').'://'.($url['host'] ?? '').($url['path'] ?? '').($url['query'] ?? '');
 }
+
+class InvalidByteError {
+    private $byte;
+
+    public function __construct($byte) {
+        $this->byte = $byte;
+    }
+
+    public function getByte() {
+        return $this->byte;
+    }
+
+    public function __toString() {
+        return "InvalidByteError: " . $this->byte;
+    }
+}
+
+function decode(&$dst, $src) {
+    $i = 0;
+    $j = 1;
+    $srcLength = count($src);
+    while ($j < $srcLength) {
+        $a = fromHexChar($src[$j - 1]);
+        if (!$a[1]) {
+            return array($i, $src[$j - 1]);
+        }
+        $b = fromHexChar($src[$j]);
+        if (!$b[1]) {
+            return array($i, $src[$j]);
+        }
+        $dst[$i] = ($a[0] << 4) | $b[0];
+        $i++;
+        $j += 2;
+    }
+    if ($srcLength % 2 === 1) {
+        if (!fromHexChar($src[$j - 1])[1]) {
+            return array($i, $src[$j - 1]);
+        }
+        return array($i, new ErrLengthException());
+    }
+    return array($i, null);
+}
+
+function fromHexChar($c) {
+    if ('0' <= $c && $c <= '9') {
+        return array(ord($c) - ord('0'), true);
+    } elseif ('a' <= $c && $c <= 'f') {
+        return array(ord($c) - ord('a') + 10, true);
+    } elseif ('A' <= $c && $c <= 'F') {
+        return array(ord($c) - ord('A') + 10, true);
+    }
+
+    return array(0, false);
+}
+
+class ErrLengthException extends Exception {
+    public function __construct() {
+        parent::__construct("encoding/hex: odd length hex string");
+    }
+}
+
+function DecodeString($s) {
+    $src = str_split($s);
+    $n = decode($src, $src);
+    return array_slice($src, 0, $n[0]);
+}
+
+function MustParseHex($hexString) {
+    $hexString = str_replace("0x", "", $hexString);
+    $data = DecodeString($hexString);
+    if ($data === false) {
+        die("Error: Invalid hex string");
+    }
+    return $data;
+}
+
+function BitAt($b, $idx) {
+    $upperBounds = BitLen($b);
+    if ($idx >= $upperBounds) {
+        return false;
+    }
+
+    $i = (1 << ($idx % 8));
+    if (($b[(int)($idx / 8)] & $i) === $i) {
+        return 1;
+    } else return 0;
+}
+
+function BitLen($b) {
+    $numBytes = count($b);
+    if ($numBytes === 0) {
+        return 0;
+    }
+    // The most significant bit is present in the last byte in the array.
+    $last = $b[$numBytes - 1];
+
+    // Determine the position of the most significant bit.
+    $msb = Len8($last);
+
+    if ($msb === -1) {
+        return 0;
+    }
+
+    // The absolute position of the most significant bit will be the number of
+    // bits in the preceding bytes plus the position of the most significant
+    // bit. Subtract this value by 1 to determine the length of the bitlist.
+    return (8*(count($b)-1) + $msb - 1);
+}
+
+const len8tab = "\x00\x01\x02\x02\x03\x03\x03\x03\x04\x04\x04\x04\x04\x04\x04\x04" .
+           "\x05\x05\x05\x05\x05\x05\x05\x05\x05\x05\x05\x05\x05\x05\x05\x05" .
+           "\x06\x06\x06\x06\x06\x06\x06\x06\x06\x06\x06\x06\x06\x06\x06\x06" .
+           "\x06\x06\x06\x06\x06\x06\x06\x06\x06\x06\x06\x06\x06\x06\x06\x06" .
+           "\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07" .
+           "\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07" .
+           "\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07" .
+           "\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07" .
+           "\x08\x08\x08\x08\x08\x08\x08\x08\x08\x08\x08\x08\x08\x08\x08\x08" .
+           "\x08\x08\x08\x08\x08\x08\x08\x08\x08\x08\x08\x08\x08\x08\x08\x08" .
+           "\x08\x08\x08\x08\x08\x08\x08\x08\x08\x08\x08\x08\x08\x08\x08\x08" .
+           "\x08\x08\x08\x08\x08\x08\x08\x08\x08\x08\x08\x08\x08\x08\x08\x08" .
+           "\x08\x08\x08\x08\x08\x08\x08\x08\x08\x08\x08\x08\x08\x08\x08\x08" .
+           "\x08\x08\x08\x08\x08\x08\x08\x08\x08\x08\x08\x08\x08\x08\x08\x08" .
+           "\x08\x08\x08\x08\x08\x08\x08\x08\x08\x08\x08\x08\x08\x08\x08\x08" .
+           "\x08\x08\x08\x08\x08\x08\x08\x08\x08\x08\x08\x08\x08\x08\x08\x08";
+
+function Len8($x) {
+    return ord(len8tab[$x]);
+}
+
+print_r(MustParseHex("0x010000000000000004000000000000000000000000000000000000000000000000000010"));
+
+$test = MustParseHex("0xffdfffffeffffffd7ffffffffffffffffffffffffffffffffffffbfffdffffefffffff1e");
+echo BitLen($test) . "\n";
+for($i = 0; $i < BitLen($test); $i++) {
+    echo BitAt($test, $i);
+}

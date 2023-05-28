@@ -312,11 +312,3 @@ const len8tab = "\x00\x01\x02\x02\x03\x03\x03\x03\x04\x04\x04\x04\x04\x04\x04\x0
 function Len8($x) {
     return ord(len8tab[$x]);
 }
-
-print_r(MustParseHex("0x010000000000000004000000000000000000000000000000000000000000000000000010"));
-
-$test = MustParseHex("0xffdfffffeffffffd7ffffffffffffffffffffffffffffffffffffbfffdffffefffffff1e");
-echo BitLen($test) . "\n";
-for($i = 0; $i < BitLen($test); $i++) {
-    echo BitAt($test, $i);
-}

@@ -138,15 +138,12 @@ abstract class BeaconAbstractModule extends CoreModule
         }
     }
 
+    // what to do:
+    // 1. Checkout every epoch for changing validator balances - it will be rewards
+    // 2. Checkout every slot for withdrawals - it's getting out their "free" money out of stake (but body still staked)
+
     final public function pre_process_block($block_id)
     {
-        // if ($block_id === 0) // Block #0 is there, but the node doesn't return data for it
-        // {
-        //     $this->block_time = date('Y-m-d H:i:s', 0);
-        //     $this->set_return_events([]);
-        //     return;
-        // }
-
         $block_times = [];
 
         $events = [];
@@ -157,18 +154,6 @@ abstract class BeaconAbstractModule extends CoreModule
             endpoint: "eth/v1/beacon/blocks/{$this->block_hash}",
             timeout: $this->timeout
         );
-        // TODO: this should be rewritten with requester_multi()
-
-        // ['block' => [1, 4, 'INT'],                       --- EPOCH ---
-        //  'transaction' => [2, -1, 'BYTEA'],              --- state root --- 
-        //  'sort_key' => [3, 4, 'INT'],                    --- SLOT ---
-        //  'time' => [4, 8, 'TIMESTAMP'], 
-        //  'address' => [5, -1, 'BYTEA'],                  --- Validator ---
-        //  'currency' => [6, -1, 'BYTEA'],                          
-        //  'effect' => [7, -1, 'NUMERIC'],                 --- 0 - no, 1 - for --- 
-        //  'failed' => [8, 1, 'BOOLEAN'],                  --- if block not passed ---
-        //  'extra' => [9, -1, 'BYTEA'],                    --- block root (voting for) --- 
-        //  'extra_indexed' => [10, -1, 'BYTEA'],           --- current voting block root  --- 
 
         $epoch = (int)(floor((int)$this->block_id / 32));
         $state_root = "";
@@ -179,56 +164,44 @@ abstract class BeaconAbstractModule extends CoreModule
         $key_tes = 0;
         $slot_attested_prev = 0;
 
-
-        // /eth/v1/beacon/states/:state_id/committees?slot=6504800
-
-        // change logic for another endpoint /eth/v1/beacon/blocks/:block_id/attestations 
-        // /eth/v1/validator/duties/proposer/:epoch - here to get proposer of the block
-
         if(array_key_exists("data", $block)) {
             $block = $block["data"];
             if(array_key_exists("message", $block)) {
                 $block = $block["message"];
-                if(array_key_exists("state_root", $block)) {
-                    $state_root = $block["state_root"];
-                }
+                // if(array_key_exists("state_root", $block)) {
+                //     $state_root = $block["state_root"];
+                // }
                 if(array_key_exists("body", $block)) {
                     $block = $block["body"];
-                    if(array_key_exists("attestations", $block)) {
-                        $attestations = $block["attestations"];
-                        foreach($attestations as $attestation) {
-                            if(array_key_exists("data", $attestation)) {
-                                if(array_key_exists("index", $attestation["data"]) && array_key_exists("slot", $attestation["data"])) {
-                                    $index = (int)$attestation["data"]["index"];
-                                    $slot_attested = (int)$attestation["data"]["slot"];
-                                    if ($slot_attested != $slot_attested_prev) {
-                                        $committees = $this->get_committees($slot_attested);
-                                        $slot_attested_prev = $slot_attested;
-                                    }
-                                    $validators = $committees[$index];
-                                }
-                                if(array_key_exists("beacon_block_root", $attestation["data"])){
-                                    $block_root_cur = $attestation["data"]["beacon_block_root"];
-                                }
-                                if(array_key_exists("aggregation_bits", $attestation)){
-                                    $aggregation_bits = MustParseHex($attestation["aggregation_bits"]);
-                                }
-                                for($i = 0; $i < BitLen($aggregation_bits); $i++) {
-                                    $validator = $validators["validators"][$i];
-                                    $events[] = [
-                                        'block' => $slot,
-                                        'transaction' => $state_root,
-                                        'sort_key' => $key_tes++,
-                                        'time' => date('Y-m-d H:i:s', $epoch),
-                                        'address' => $validator,
-                                        'effect' => (BitAt($aggregation_bits, $i) ? "1" : "0"),
-                                        'failed' => false,
-                                        'extra' => $block_root,
-                                        'extra_indexed' => $block_root_cur
-                                    ];
-                                }
+                    if(array_key_exists("execution_payload", $block)) {
+                        $execution_payload = $block["execution_payload"];
+                        if(array_key_exists("withdrawals", $execution_payload)) {
+                            $withdrawals = $execution_payload["withdrawals"];
+                            foreach($withdrawals as $withdrawal) {
+                                $address = $withdrawal["address"];
+                                $events[] = [
+                                    'block' => $slot,
+                                    'transaction' => $epoch,
+                                    'sort_key' => $key_tes++,
+                                    'time' => date('Y-m-d H:i:s', $epoch),
+                                    'address' => $address,
+                                    'effect' => $withdrawal["amount"],
+                                    'failed' => false,
+                                    'extra' => $withdrawal["validator_index"],
+                                    'extra_indexed' => $block_root_cur
+                                ];
+                                $events[] = [
+                                    'block' => $slot,
+                                    'transaction' => $epoch,
+                                    'sort_key' => $key_tes++,
+                                    'time' => date('Y-m-d H:i:s', $epoch),
+                                    'address' => "the-void",
+                                    'effect' => "-" . $withdrawal["amount"],
+                                    'failed' => false,
+                                    'extra' => $withdrawal["validator_index"],
+                                    'extra_indexed' => $block_root_cur
+                                ];
                             }
-
                         }
                     }
                 }
@@ -236,6 +209,10 @@ abstract class BeaconAbstractModule extends CoreModule
         }
 
         $this->block_time = "0";
+        // $smm = 0;
+        // foreach($events as $event) {
+        //     $event["effect"];
+        // }
 
         $this->set_return_events($events);
     }

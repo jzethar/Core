@@ -1,7 +1,7 @@
 <?php declare(strict_types = 1);
 
 
-final class BeaconModule extends BeaconAbstractModule implements Module
+final class BeaconValidatorRewardsModule extends BeaconValidatorRewardsAbstractModule implements Module
 {
     function initialize()
     {

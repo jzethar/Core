@@ -1,7 +1,7 @@
 <?php declare(strict_types = 1);
 
 
-abstract class BeaconAbstractModule extends CoreModule
+abstract class BeaconValidatorRewardsAbstractModule extends CoreModule
 {
     public ?BlockHashFormat $block_hash_format = BlockHashFormat::HexWithout0x;
     public ?AddressFormat $address_format = AddressFormat::AlphaNumeric;
@@ -25,10 +25,6 @@ abstract class BeaconAbstractModule extends CoreModule
     public ?bool $forking_implemented = true;
 
     public ?string $parent_root = null;
-
-    // Blockchain-specific
-
-    //
 
     final public function pre_initialize()
     {
@@ -138,126 +134,152 @@ abstract class BeaconAbstractModule extends CoreModule
         }
     }
 
-    // what to do:
-    // 1. Checkout every epoch for changing validator balances - it will be rewards
-    // 2. Checkout every slot for withdrawals - it's getting out their "free" money out of stake (but body still staked)
-
     final public function pre_process_block($block_id)
     {
-        $block_times = [];
-
         $events = [];
-        $sort_key = 0;
-
-        $block = requester_single(
+        if($this->block_id % 32 != 31) {
+            $this->block_time = "0";
+            $this->set_return_events($events);
+            return;
+        }
+        $epoch = (int)($this->block_id / 32);
+        
+        $proposers = requester_single(
             $this->select_node(),
-            endpoint: "eth/v1/beacon/blocks/{$this->block_hash}",
+            endpoint: "eth/v1/validator/duties/proposer/{$epoch}",
             timeout: $this->timeout
         );
 
-        $epoch = (int)(floor((int)$this->block_id / 32));
-        $state_root = "";
-        $slot = $this->block_id;
-        $validator = "";
-        $block_root = "";
-        $block_root_cur = "";
-        $key_tes = 0;
-        $slot_attested_prev = 0;
+        $proposers_arr = [];
+        if(array_key_exists("data", $proposers)) {
+            foreach($proposers["data"] as $proposer) {
+                $proposers_arr[$proposer["slot"]] = $proposer["validator_index"];
+            }
+        }
 
-        if(array_key_exists("data", $block)) {
-            $block = $block["data"];
-            if(array_key_exists("message", $block)) {
-                $block = $block["message"];
-                // if(array_key_exists("state_root", $block)) {
-                //     $state_root = $block["state_root"];
-                // }
-                if(array_key_exists("body", $block)) {
-                    $block = $block["body"];
-                    if(array_key_exists("execution_payload", $block)) {
-                        $execution_payload = $block["execution_payload"];
-                        if(array_key_exists("withdrawals", $execution_payload)) {
-                            $withdrawals = $execution_payload["withdrawals"];
-                            foreach($withdrawals as $withdrawal) {
-                                $address = $withdrawal["address"];
-                                $events[] = [
-                                    'block' => $slot,
-                                    'transaction' => $epoch,
-                                    'sort_key' => $key_tes++,
-                                    'time' => date('Y-m-d H:i:s', $epoch),
-                                    'address' => $address,
-                                    'effect' => $withdrawal["amount"],
-                                    'failed' => false,
-                                    'extra' => $withdrawal["validator_index"],
-                                    'extra_indexed' => $block_root_cur
-                                ];
-                                $events[] = [
-                                    'block' => $slot,
-                                    'transaction' => $epoch,
-                                    'sort_key' => $key_tes++,
-                                    'time' => date('Y-m-d H:i:s', $epoch),
-                                    'address' => "the-void",
-                                    'effect' => "-" . $withdrawal["amount"],
-                                    'failed' => false,
-                                    'extra' => $withdrawal["validator_index"],
-                                    'extra_indexed' => $block_root_cur
-                                ];
-                            }
-                        }
+        $rewards = [];
+
+        $slot_end = array_key_last($proposers_arr);
+        $slot_start = array_key_first($proposers_arr);
+
+        $rq_blocks = [];
+        $rq_committees = [];
+        $rq_blocks_data = [];
+        $rq_committees_data = [];
+
+        for($i = $slot_start; $i <= $slot_end; $i++) {
+            $rq_blocks[] = requester_multi_prepare($this->select_node(), endpoint: "eth/v1/beacon/rewards/blocks/{$i}");
+        }
+        $rq_blocks_multi = requester_multi(
+            $rq_blocks,
+            20,
+            timeout: $this->timeout,
+            valid_codes: [200, 404],
+        );
+        foreach ($rq_blocks_multi as $v) {
+            $rq_blocks_data[] = requester_multi_process($v, ignore_errors: true);
+        }
+
+        for($i = $slot_start; $i <= $slot_end; $i++) {
+            $rq_committees[] = requester_multi_prepare($this->select_node(), endpoint: "eth/v1/beacon/rewards/sync_committee/{$i}", params: "[]");
+        }
+        $rq_committees_multi = requester_multi(
+            $rq_committees,
+            20,
+            timeout: $this->timeout,
+            valid_codes: [200, 404],
+        );
+        foreach ($rq_committees_multi as $v) {
+            $rq_committees_data[] = requester_multi_process($v, ignore_errors: true);
+        }
+
+        foreach ($rq_committees_data as $rq) {
+            if (array_key_exists("data", $rq)) {
+                $slot_rewards = $rq["data"];
+                foreach ($slot_rewards as $rw) {
+                    if (array_key_exists($rw["validator_index"], $rewards)) {
+                        $rewards[$rw["validator_index"]] += $rw["reward"];
+                    } else {
+                        $rewards[$rw["validator_index"]] = $rw["reward"];
                     }
                 }
             }
+        }
+        foreach ($rq_blocks_data as $rq) {
+            if (array_key_exists("data", $rq)) {
+                $slot_rewards = $rq["data"];
+                $proposer_index = $slot_rewards["proposer_index"];
+                if (array_key_exists($proposer_index, $rewards)) {
+                    $rewards[$proposer_index] += ($slot_rewards["attestations"] +
+                        $slot_rewards["proposer_slashings"] +
+                        $slot_rewards["attester_slashings"] +
+                        $slot_rewards["sync_aggregate"]);
+                } else {
+                    $rewards[$proposer_index] = ($slot_rewards["attestations"] +
+                        $slot_rewards["proposer_slashings"] +
+                        $slot_rewards["attester_slashings"] +
+                        $slot_rewards["sync_aggregate"]);
+                }
+            }
+        }
+        $attestations = requester_single(
+            $this->select_node(),
+            endpoint: "eth/v1/beacon/rewards/attestations/{$epoch}",
+            params: '[]',
+            no_json_encode: true
+        );
+        if(array_key_exists("data", $attestations)) {
+            if(array_key_exists("total_rewards", $attestations["data"])) {
+                $attestations = $attestations["data"]["total_rewards"];
+                foreach($attestations as $attestation) {
+                    if(array_key_exists($attestation["validator_index"], $rewards)) {
+                        // what to do with inclusion_delay that can be in data->total_rewards[i]
+                        $rewards[$attestation["validator_index"]] += (
+                            $attestation["head"] + $attestation["target"] + $attestation["source"]
+                        );
+                    } else {
+                        $rewards[$attestation["validator_index"]] = ($attestation["head"] + $attestation["target"] + $attestation["source"]);
+                    }
+                }
+            }
+        }
+
+        $key_tes = 0;
+
+        foreach($rewards as $validator => $reward) {
+            $events[] = [
+                'block' => $epoch,
+                'transaction' => "",
+                'sort_key' => $key_tes++,
+                'time' => date('Y-m-d H:i:s', 123223456),
+                'address' => $validator,
+                'effect' => (string)$reward,
+                'failed' => false,
+                'extra' => "n",
+                'extra_indexed' => "n"
+            ];
+            $events[] = [
+                'block' => $epoch,
+                'transaction' => "",
+                'sort_key' => $key_tes++,
+                'time' => date('Y-m-d H:i:s', 123223456),
+                'address' => "the-void",
+                'effect' => (string)($reward * -1),
+                'failed' => false,
+                'extra' => "n",
+                'extra_indexed' => "n"
+            ];
         }
 
         $this->block_time = "0";
-        // $smm = 0;
-        // foreach($events as $event) {
-        //     $event["effect"];
-        // }
-
         $this->set_return_events($events);
     }
 
-    private function get_committees($slot) {
-
-        $header = requester_single(
-            $this->select_node(),
-            endpoint: "eth/v1/beacon/headers?slot={$slot}",
-            timeout: $this->timeout
-        );
-
-        $state_id = "";
-        if(array_key_exists("data", $header)) {
-            $result = $header["data"];
-            if(count($result) == 1) {
-                $result = $result[0];
-                if(array_key_exists("header", $result)) {
-                    $result = $result["header"];
-                    if(array_key_exists("message", $result)) {
-                        $result = $result["message"];
-                        if(array_key_exists("state_root", $result)) {
-                            $state_id = $result["state_root"];
-                        }
-                    }
-                }
-            }
-        }
-
-        $committees = requester_single(
-            $this->select_node(),
-            endpoint: "eth/v1/beacon/states/{$state_id}/committees?slot={$slot}",
-            timeout: $this->timeout
-        );
-        if (array_key_exists("data", $committees)) {
-            $committees = $committees["data"];
-        }
-        return $committees;
-    } 
-
     // Getting balances from the node
-    public function api_get_balance($address)
+    public function api_get_balance($index)
     {
         return (string)requester_single($this->select_node(),
-            endpoint: "account?account={$address}",
-            timeout: $this->timeout)['balance'];
+        endpoint: "eth/v1/beacon/states/head/validators/{$index}",
+        timeout: $this->timeout)['data']['balance'];
     }
 }

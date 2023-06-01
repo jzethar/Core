@@ -9,7 +9,7 @@
 // Just a single curl request
 function requester_single($daemon, $endpoint = '', $params = [], $result_in = '', $timeout = 600, $valid_codes = [200], $no_json_encode = false)
 {
-    static $curl = null;
+    $curl = null;
 
     if (is_null($curl))
     {
@@ -236,7 +236,7 @@ function requester_multi_prepare($daemon, $endpoint = '', $params = [], $timeout
                     CURLOPT_FOLLOWLOCATION => false,
                     CURLOPT_HTTPHEADER     => ['Content-type: application/json'],
                     CURLOPT_POST           => true,
-                    CURLOPT_POSTFIELDS     => json_encode($params),
+                    CURLOPT_POSTFIELDS     => ($params),
                     CURLOPT_TIMEOUT        => $timeout,
         ];
     }

@@ -25,6 +25,10 @@ abstract class BeaconValidatorRewardsAbstractModule extends CoreModule
     public ?bool $forking_implemented = true;
 
     public ?string $parent_root = null;
+    private static $events_prev = [];
+    private static $epoch_prev = 0;
+
+    private ?string $epoch = null;
 
     final public function pre_initialize()
     {
@@ -40,6 +44,12 @@ abstract class BeaconValidatorRewardsAbstractModule extends CoreModule
     {
         $result = requester_single($this->select_node(), endpoint: 'eth/v1/beacon/headers', timeout: $this->timeout);
         return $this->get_header_slot($result);
+        // $epoch = ((int)($slot / 32)) - 1;
+        // if($epoch == static::$epoch_prev) {
+        //     return ((static::$epoch_prev * 32) + 31);
+        // } else {
+        //     return (($epoch * 32) + 31);
+        // }
     }
 
     private function get_header_slot($header) {
@@ -134,16 +144,16 @@ abstract class BeaconValidatorRewardsAbstractModule extends CoreModule
         }
     }
 
+    // okey, let's think that $block_id here is a latest block of blockchain
     final public function pre_process_block($block_id)
     {
         $events = [];
-        if($this->block_id % 32 != 31) {
-            $this->block_time = "0";
-            $this->set_return_events($events);
-            return;
-        }
-        $epoch = (int)($this->block_id / 32);
+        $epoch = (int)($this->block_id / 32) - 2;
         
+        if($epoch == static::$epoch_prev) {
+            return static::$events_prev;
+        }
+
         $proposers = requester_single(
             $this->select_node(),
             endpoint: "eth/v1/validator/duties/proposer/{$epoch}",
@@ -181,7 +191,11 @@ abstract class BeaconValidatorRewardsAbstractModule extends CoreModule
         }
 
         for($i = $slot_start; $i <= $slot_end; $i++) {
-            $rq_committees[] = requester_multi_prepare($this->select_node(), endpoint: "eth/v1/beacon/rewards/sync_committee/{$i}", params: "[]");
+            $rq_committees[] = requester_multi_prepare(
+                $this->select_node(),
+                endpoint: "eth/v1/beacon/rewards/sync_committee/{$i}",
+                params: "[]"
+            );
         }
         $rq_committees_multi = requester_multi(
             $rq_committees,
@@ -272,6 +286,8 @@ abstract class BeaconValidatorRewardsAbstractModule extends CoreModule
         }
 
         $this->block_time = "0";
+        static::$events_prev = $events;
+        static::$epoch_prev = $epoch;
         $this->set_return_events($events);
     }
 

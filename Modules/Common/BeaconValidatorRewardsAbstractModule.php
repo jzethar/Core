@@ -12,7 +12,7 @@ abstract class BeaconValidatorRewardsAbstractModule extends CoreModule
     public ?FeeRenderModel $fee_render_model = FeeRenderModel::ExtraF;
     public ?bool $hidden_values_only = false;
 
-    public ?array $events_table_fields = ['block', 'transaction', 'sort_key', 'time', 'address', 'effect', 'failed', 'extra', 'extra_indexed'];
+    public ?array $events_table_fields = ['block', 'transaction', 'sort_key', 'time', 'address', 'effect', 'extra'];
     public ?array $events_table_nullable_fields = ['extra'];
 
     public ?ExtraDataModel $extra_data_model = ExtraDataModel::Default;
@@ -40,28 +40,26 @@ abstract class BeaconValidatorRewardsAbstractModule extends CoreModule
         // if (is_null($this->workchain)) throw new DeveloperError("`workchain` is not set");
     }
 
+    // get number of fin epoch 
     public function inquire_latest_block()
     {
         $result = requester_single($this->select_node(), endpoint: 'eth/v1/beacon/headers', timeout: $this->timeout);
-        return $this->get_header_slot($result);
-        // $epoch = ((int)($slot / 32)) - 1;
-        // if($epoch == static::$epoch_prev) {
-        //     return ((static::$epoch_prev * 32) + 31);
-        // } else {
-        //     return (($epoch * 32) + 31);
-        // }
+        $slot = $this->get_header_slot($result);
+        $epoch = ((int)($slot / 32)) - 2;
+        return $epoch;
     }
 
-    private function get_header_slot($header) {
-        if(array_key_exists("data", $header)) {
+    private function get_header_slot($header)
+    {
+        if (array_key_exists("data", $header)) {
             $result = $header["data"];
-            if(count($result) == 1) {
+            if (count($result) == 1) {
                 $result = $result[0];
-                if(array_key_exists("header", $result)) {
+                if (array_key_exists("header", $result)) {
                     $result = $result["header"];
-                    if(array_key_exists("message", $result)) {
+                    if (array_key_exists("message", $result)) {
                         $result = $result["message"];
-                        if(array_key_exists("slot", $result)) {
+                        if (array_key_exists("slot", $result)) {
                             return (int)$result["slot"];
                         }
                     }
@@ -70,6 +68,8 @@ abstract class BeaconValidatorRewardsAbstractModule extends CoreModule
         }
     }
 
+
+    // merge all hashes of blocks in epoch 
     public function ensure_block($block_id, $break_on_first = false)
     {
         $multi_curl = [];
@@ -145,10 +145,16 @@ abstract class BeaconValidatorRewardsAbstractModule extends CoreModule
     }
 
     // okey, let's think that $block_id here is a latest block of blockchain
-    final public function pre_process_block($block_id)
+    final public function pre_process_block($epoch)
     {
         $events = [];
-        $epoch = (int)($this->block_id / 32) - 2;
+        $rewards = [];
+        $rewards_slots = []; // key - validator, [key] - [slot, reward]
+        $rq_blocks = [];
+        $rq_committees = [];
+        $rq_blocks_data = [];
+        $rq_committees_data = [];
+        $rq_slot_time = [];
         
         if($epoch == static::$epoch_prev) {
             return static::$events_prev;
@@ -160,25 +166,49 @@ abstract class BeaconValidatorRewardsAbstractModule extends CoreModule
             timeout: $this->timeout
         );
 
-        $proposers_arr = [];
         if(array_key_exists("data", $proposers)) {
             foreach($proposers["data"] as $proposer) {
-                $proposers_arr[$proposer["slot"]] = $proposer["validator_index"];
+                $slots[$proposer["slot"]] = 0;
+                $rewards_slots[$proposer["validator_index"]] = [$proposer["slot"], ""];
             }
         }
 
-        $rewards = [];
+        foreach($slots as $slot => $tm) {
+            $rq_slot_time[] = requester_multi_prepare($this->select_node(), endpoint: "eth/v1/beacon/blocks/{$slot}");
+        }
+        $rq_slot_time_multi = requester_multi(
+            $rq_slot_time,
+            20,
+            timeout: $this->timeout,
+            valid_codes: [200, 404],
+        );
+        foreach($rq_slot_time_multi as $slot) {
+            $slot_info = requester_multi_process($slot, ignore_errors: true);
+            if(array_key_exists("code", $slot_info)) {
+                $code = $slot_info["code"];
+                if($code == "404") {
+                    continue;
+                }
+            } else {
+                if (array_key_exists("data", $slot_info)) {
+                    $data = $slot_info["data"];
+                    if (array_key_exists("message", $data)) {
+                        $data = $data["message"];
+                        $slot_id = $data["slot"];
+                        if (array_key_exists("execution_payload", $data["body"])) {
+                            $execution_payload = $data["body"]["execution_payload"];
+                            if (array_key_exists("timestamp", $execution_payload)) {
+                                $slots[$slot_id] = (int)$execution_payload["timestamp"];
+                            }
+                        }
+                        
+                    }
+                }
+            }
+        }
 
-        $slot_end = array_key_last($proposers_arr);
-        $slot_start = array_key_first($proposers_arr);
-
-        $rq_blocks = [];
-        $rq_committees = [];
-        $rq_blocks_data = [];
-        $rq_committees_data = [];
-
-        for($i = $slot_start; $i <= $slot_end; $i++) {
-            $rq_blocks[] = requester_multi_prepare($this->select_node(), endpoint: "eth/v1/beacon/rewards/blocks/{$i}");
+        foreach ($slots as $slot => $tm) {
+            $rq_blocks[] = requester_multi_prepare($this->select_node(), endpoint: "eth/v1/beacon/rewards/blocks/{$slot}");
         }
         $rq_blocks_multi = requester_multi(
             $rq_blocks,
@@ -190,10 +220,10 @@ abstract class BeaconValidatorRewardsAbstractModule extends CoreModule
             $rq_blocks_data[] = requester_multi_process($v, ignore_errors: true);
         }
 
-        for($i = $slot_start; $i <= $slot_end; $i++) {
+        foreach ($slots as $slot => $tm) {
             $rq_committees[] = requester_multi_prepare(
                 $this->select_node(),
-                endpoint: "eth/v1/beacon/rewards/sync_committee/{$i}",
+                endpoint: "eth/v1/beacon/rewards/sync_committee/{$slot}",
                 params: "[]"
             );
         }
@@ -205,6 +235,14 @@ abstract class BeaconValidatorRewardsAbstractModule extends CoreModule
         );
         foreach ($rq_committees_multi as $v) {
             $rq_committees_data[] = requester_multi_process($v, ignore_errors: true);
+        }
+
+        foreach ($rq_blocks_data as $rq) {
+            if (array_key_exists("data", $rq)) {
+                $slot_rewards = $rq["data"];
+                $proposer_index = $slot_rewards["proposer_index"];
+                $rewards_slots[$proposer_index][1] = $slot_rewards["total"];
+            }
         }
 
         foreach ($rq_committees_data as $rq) {
@@ -219,57 +257,76 @@ abstract class BeaconValidatorRewardsAbstractModule extends CoreModule
                 }
             }
         }
-        foreach ($rq_blocks_data as $rq) {
-            if (array_key_exists("data", $rq)) {
-                $slot_rewards = $rq["data"];
-                $proposer_index = $slot_rewards["proposer_index"];
-                if (array_key_exists($proposer_index, $rewards)) {
-                    $rewards[$proposer_index] += ($slot_rewards["attestations"] +
-                        $slot_rewards["proposer_slashings"] +
-                        $slot_rewards["attester_slashings"] +
-                        $slot_rewards["sync_aggregate"]);
-                } else {
-                    $rewards[$proposer_index] = ($slot_rewards["attestations"] +
-                        $slot_rewards["proposer_slashings"] +
-                        $slot_rewards["attester_slashings"] +
-                        $slot_rewards["sync_aggregate"]);
-                }
+
+        $key_tes = 0;
+
+        foreach ($rewards_slots as $validator => $info) {
+            $extra = "p";
+            if ($slots[$info[0]] == 0) {
+                $extra = "om";
             }
+            $events[] = [
+                'block' => $epoch,
+                'transaction' => $info[0],
+                'sort_key' => $key_tes++,
+                'time' => date('Y-m-d H:i:s', $slots[$info[0]]),
+                'address' => $validator,
+                'effect' => $info[1],
+                'extra' => $extra
+            ];
+            $events[] = [
+                'block' => $epoch,
+                'transaction' => $info[0],
+                'sort_key' => $key_tes++,
+                'time' => date('Y-m-d H:i:s', $slots[$info[0]]),
+                'address' => "the-void",
+                'effect' => "-" . $info[1],
+                'extra' => $extra
+            ];
         }
+
+        echo count($rewards);
+        // transaction null 
+
         $attestations = requester_single(
             $this->select_node(),
             endpoint: "eth/v1/beacon/rewards/attestations/{$epoch}",
-            params: '[]',
-            no_json_encode: true
+            params: "[]",
+            no_json_encode: true,
+            timeout: 6000
         );
-        if(array_key_exists("data", $attestations)) {
-            if(array_key_exists("total_rewards", $attestations["data"])) {
+
+        if (array_key_exists("data", $attestations)) {
+            if (array_key_exists("total_rewards", $attestations["data"])) {
                 $attestations = $attestations["data"]["total_rewards"];
-                foreach($attestations as $attestation) {
-                    if(array_key_exists($attestation["validator_index"], $rewards)) {
+                foreach ($attestations as $attestation) {
+                    if (array_key_exists($attestation["validator_index"], $rewards)) {
                         // what to do with inclusion_delay that can be in data->total_rewards[i]
-                        $rewards[$attestation["validator_index"]] += (
-                            $attestation["head"] + $attestation["target"] + $attestation["source"]
+                        $rewards[$attestation["validator_index"]] += ($attestation["head"] +
+                            $attestation["target"] +
+                            $attestation["source"]
                         );
                     } else {
-                        $rewards[$attestation["validator_index"]] = ($attestation["head"] + $attestation["target"] + $attestation["source"]);
+                        $rewards[$attestation["validator_index"]] = ($attestation["head"] +
+                            $attestation["target"] +
+                            $attestation["source"]);
                     }
                 }
             }
         }
 
-        $key_tes = 0;
 
+        // the need to check it still not working this part
         foreach($rewards as $validator => $reward) {
             $events[] = [
                 'block' => $epoch,
-                'transaction' => "",
+                'transaction' => "", // number of block or null - for epoch
                 'sort_key' => $key_tes++,
                 'time' => date('Y-m-d H:i:s', 123223456),
                 'address' => $validator,
                 'effect' => (string)$reward,
                 'failed' => false,
-                'extra' => "n",
+                'extra' => "n", // proposing
                 'extra_indexed' => "n"
             ];
             $events[] = [
@@ -278,10 +335,10 @@ abstract class BeaconValidatorRewardsAbstractModule extends CoreModule
                 'sort_key' => $key_tes++,
                 'time' => date('Y-m-d H:i:s', 123223456),
                 'address' => "the-void",
-                'effect' => (string)($reward * -1),
-                'failed' => false,
-                'extra' => "n",
-                'extra_indexed' => "n"
+                'effect' => (string)($reward * -1), //string
+                'failed' => false, // 
+                'extra' => "n", //       delete from columns 
+                'extra_indexed' => "n" //
             ];
         }
 

@@ -134,7 +134,7 @@ abstract class BeaconChainLikeMainModule extends CoreModule
 
         foreach ($proposers as $proposer)
         {
-            $slots[$proposer['slot']] = 0;
+            $slots[$proposer['slot']] = null;
             $rewards_slots[$proposer['validator_index']] = [$proposer['slot'], null];
         }
 
@@ -161,6 +161,8 @@ abstract class BeaconChainLikeMainModule extends CoreModule
 
             $slots[$slot_id] = $timestamp;
         }
+
+        $this->block_time = date('Y-m-d H:i:s', $slots[max(array_keys($slots))]);
 
         foreach ($slots as $slot => $tm)
             $rq_blocks[] = requester_multi_prepare($this->select_node(), endpoint: "eth/v1/beacon/rewards/blocks/{$slot}");
@@ -213,7 +215,6 @@ abstract class BeaconChainLikeMainModule extends CoreModule
         }
 
         $key_tes = 0;
-        $last_slot = max(array_keys($slots));
 
         foreach ($rewards_slots as $validator => $info)
         {
@@ -231,7 +232,7 @@ abstract class BeaconChainLikeMainModule extends CoreModule
                 'block' => $block,
                 'transaction' => $info[0],
                 'sort_key' => $key_tes++,
-                'time' => date('Y-m-d H:i:s', $slots[$info[0]]),
+                'time' => $this->block_time,
                 'address' => 'the-void',
                 'effect' => '-' . $effect,
                 'extra' => $extra,
@@ -241,7 +242,7 @@ abstract class BeaconChainLikeMainModule extends CoreModule
                 'block' => $block,
                 'transaction' => $info[0],
                 'sort_key' => $key_tes++,
-                'time' => date('Y-m-d H:i:s', $slots[$info[0]]),
+                'time' => $this->block_time,
                 'address' => $validator,
                 'effect' => $effect,
                 'extra' => $extra,
@@ -275,7 +276,7 @@ abstract class BeaconChainLikeMainModule extends CoreModule
             }
         }
 
-        foreach($rewards as $validator => $reward)
+        foreach ($rewards as $validator => $reward)
         {
             $this_void = bcmul($reward, '-1');
             $this_void = ($this_void === '0') ? '-0' : $this_void;
@@ -286,7 +287,7 @@ abstract class BeaconChainLikeMainModule extends CoreModule
                     'block' => $block,
                     'transaction' => null,
                     'sort_key' => $key_tes++,
-                    'time' => date('Y-m-d H:i:s', $slots[$last_slot]),
+                    'time' => $this->block_time,
                     'address' => 'the-void',
                     'effect' => $this_void,
                     'extra' => 'a',
@@ -296,7 +297,7 @@ abstract class BeaconChainLikeMainModule extends CoreModule
                     'block' => $block,
                     'transaction' => null,
                     'sort_key' => $key_tes++,
-                    'time' => date('Y-m-d H:i:s', $slots[$last_slot]),
+                    'time' => $this->block_time,
                     'address' => $validator,
                     'effect' => $reward,
                     'extra' => 'a'
@@ -308,7 +309,7 @@ abstract class BeaconChainLikeMainModule extends CoreModule
                     'block' => $block,
                     'transaction' => null,
                     'sort_key' => $key_tes++,
-                    'time' => date('Y-m-d H:i:s', $slots[$last_slot]),
+                    'time' => $this->block_time,
                     'address' => $validator,
                     'effect' => $reward,
                     'extra' => 'a'
@@ -318,7 +319,7 @@ abstract class BeaconChainLikeMainModule extends CoreModule
                     'block' => $block,
                     'transaction' => null,
                     'sort_key' => $key_tes++,
-                    'time' => date('Y-m-d H:i:s', $slots[$last_slot]),
+                    'time' => $this->block_time,
                     'address' => 'the-void',
                     'effect' => $this_void,
                     'extra' => 'a',
@@ -326,7 +327,6 @@ abstract class BeaconChainLikeMainModule extends CoreModule
             }
         }
 
-        $this->block_time = end($slots[$last_slot]);
         $this->set_return_events($events);
     }
 

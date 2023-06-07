@@ -277,25 +277,53 @@ abstract class BeaconChainLikeMainModule extends CoreModule
 
         foreach($rewards as $validator => $reward)
         {
-            $events[] = [
-                'block' => $block,
-                'transaction' => null,
-                'sort_key' => $key_tes++,
-                'time' => date('Y-m-d H:i:s', $slots[$last_slot]),
-                'address' => 'the-void',
-                'effect' => '-' . $reward, // nikzh: bcmul не надо тут использовать, потому что нам для ядра нужно -0, если там будет 0
-                'extra' => 'a',
-            ];
+            $this_void = bcmul($reward, '-1');
+            $this_void = ($this_void === '0') ? '-0' : $this_void;
 
-            $events[] = [
-                'block' => $block,
-                'transaction' => null,
-                'sort_key' => $key_tes++,
-                'time' => date('Y-m-d H:i:s', $slots[$last_slot]),
-                'address' => $validator,
-                'effect' => $reward,
-                'extra' => 'a'
-            ];
+            if (str_contains($this_void, '-'))
+            {
+                $events[] = [
+                    'block' => $block,
+                    'transaction' => null,
+                    'sort_key' => $key_tes++,
+                    'time' => date('Y-m-d H:i:s', $slots[$last_slot]),
+                    'address' => 'the-void',
+                    'effect' => $this_void,
+                    'extra' => 'a',
+                ];
+
+                $events[] = [
+                    'block' => $block,
+                    'transaction' => null,
+                    'sort_key' => $key_tes++,
+                    'time' => date('Y-m-d H:i:s', $slots[$last_slot]),
+                    'address' => $validator,
+                    'effect' => $reward,
+                    'extra' => 'a'
+                ];
+            }
+            else
+            {
+                $events[] = [
+                    'block' => $block,
+                    'transaction' => null,
+                    'sort_key' => $key_tes++,
+                    'time' => date('Y-m-d H:i:s', $slots[$last_slot]),
+                    'address' => $validator,
+                    'effect' => $reward,
+                    'extra' => 'a'
+                ];
+
+                $events[] = [
+                    'block' => $block,
+                    'transaction' => null,
+                    'sort_key' => $key_tes++,
+                    'time' => date('Y-m-d H:i:s', $slots[$last_slot]),
+                    'address' => 'the-void',
+                    'effect' => $this_void,
+                    'extra' => 'a',
+                ];
+            }
         }
 
         $this->block_time = end($slots[$last_slot]);

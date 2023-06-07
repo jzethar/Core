@@ -66,85 +66,81 @@ abstract class BeaconValidatorRewardsAbstractModule extends CoreModule
                 }
             }
         }
+        throw new RequesterEmptyResponseException("get_header_slot(fields are changed)");
     }
 
 
     // merge all hashes of blocks in epoch 
-    public function ensure_block($block_id, $break_on_first = false)
+    public function ensure_block($epoch, $break_on_first = false)
     {
-        $multi_curl = [];
+        $hashes = [];
 
-        foreach ($this->nodes as $node)
-        {
-            $multi_curl[] = requester_multi_prepare($node, endpoint: "eth/v1/beacon/headers/{$block_id}", timeout: $this->timeout);
+        $block_start = $epoch * 32;
+        $block_end = ($epoch * 32) + 31;
 
-            if ($break_on_first)
-                break;
-        }
+        foreach ($this->nodes as $node) {
+            for ($i = $block_start; $i <= $block_end; $i++) {
+                $multi_curl[] = requester_multi_prepare(
+                    $node,
+                    endpoint: "eth/v1/beacon/headers/{$i}",
+                    timeout: $this->timeout
+                );
 
-        try
-        {
-            $curl_results = requester_multi($multi_curl, limit: count($this->nodes), timeout: $this->timeout);
-        }
-        catch (RequesterException $e)
-        {
-            throw new RequesterException("ensure_block(block_id: {$block_id}): no connection, previously: " . $e->getMessage());
-        }
-
-        $hashes = requester_multi_process($curl_results[0]);
-        ksort($hashes, SORT_STRING);
-
-        if(array_key_exists("data", $hashes)) {
-            $hashes = $hashes["data"];
-            if(array_key_exists("root", $hashes)) {
-                $this->block_hash = $hashes["root"];
-            } else {
-                throw new ConsensusException("ensure_block(block_id: {$block_id}): no consensus");
+                if ($break_on_first)
+                    break;
             }
-        } else {
-            throw new ConsensusException("ensure_block(block_id: {$block_id}): no consensus");
-        }
-
-        if (count($curl_results) > 0)
-        {
-            foreach ($curl_results as $result)
-            {
-                $this_hashes = requester_multi_process($result);
-                ksort($this_hashes, SORT_STRING);
-                $this_final_hash = "";
-
-                if(array_key_exists("data", $this_hashes)) {
-                    $this_hashes = $this_hashes["data"];
-                    if(array_key_exists("root", $this_hashes)) {
-                        $this_final_hash = $this_hashes["root"];
-                    } else {
-                        throw new ConsensusException("ensure_block(block_id: {$block_id}): no consensus");
+            try {
+                $curl_results = requester_multi($multi_curl, limit: 10, timeout: $this->timeout, valid_codes: [200, 404]);
+            } catch (RequesterException $e) {
+                throw new RequesterException("ensure_block(epoch: {$epoch}): no connection, previously: " . $e->getMessage());
+            }
+            foreach($curl_results as $result) {
+                $hash_result = requester_multi_process($result);
+                $root = "";
+                $slot = "";
+                if (array_key_exists("data", $hash_result)) {
+                    $hash_result = $hash_result["data"];
+                    if (array_key_exists("root", $hash_result)) {
+                        $root = $hash_result["root"];
                     }
-                } else {
-                    throw new ConsensusException("ensure_block(block_id: {$block_id}): no consensus");
-                }
-
-                if (strtolower($this_final_hash) !== $this->block_hash)
-                {
-                    throw new ConsensusException("ensure_block(block_id: {$block_id}): no consensus");
-                } else {
-                    if(array_key_exists("header", $this_hashes)) {
-                        $this_hashes = $this_hashes["header"];
-                        if(array_key_exists("message", $this_hashes)) {
-                            $this_hashes = $this_hashes["message"];
-                            if(array_key_exists("parent_root", $this_hashes)) {
-                                $this->parent_root = $this_hashes["parent_root"];
-                                return;
+                    if (array_key_exists("header", $hash_result)) {
+                        if (array_key_exists("message", $hash_result["header"])) {
+                            if (array_key_exists("slot", $hash_result["header"]["message"])) {
+                                $slot = $hash_result["header"]["message"]["slot"];
+                            } else {
+                                throw new RequesterEmptyResponseException("get_header_slot(fields are changed)");
                             }
+                        } else {
+                            throw new RequesterEmptyResponseException("get_header_slot(fields are changed)");
                         }
+                    } else {
+                        throw new RequesterEmptyResponseException("get_header_slot(fields are changed)");
                     }
-                    throw new Exception("no field");
+                    $hashes_res[$slot] = $root;
+                }
+            }
+            ksort($hashes_res);
+            foreach($hashes_res as $slot => $hash) {
+                $hash .= $hash;
+            }
+            $hashes[] = $hash;
+            unset($hashes_res);
+            unset($hash);
+            unset($multi_curl);
+        }
+
+        for($i = 0; $i < count($hashes); $i++) {
+            if($i + 1 < count($hashes)) {
+                if($hashes[$i] != $hashes[$i+1]) {
+                    throw new ConsensusException("ensure_block(block_id: {$epoch}): no consensus"); 
                 }
             }
         }
+        $this->block_hash = $hashes[0];
+        $this->block_id = $epoch;
     }
 
-    // okey, let's think that $block_id here is a latest block of blockchain
+
     final public function pre_process_block($epoch)
     {
         $events = [];
@@ -178,7 +174,7 @@ abstract class BeaconValidatorRewardsAbstractModule extends CoreModule
         }
         $rq_slot_time_multi = requester_multi(
             $rq_slot_time,
-            20,
+            10,
             timeout: $this->timeout,
             valid_codes: [200, 404],
         );
@@ -250,7 +246,7 @@ abstract class BeaconValidatorRewardsAbstractModule extends CoreModule
                 $slot_rewards = $rq["data"];
                 foreach ($slot_rewards as $rw) {
                     if (array_key_exists($rw["validator_index"], $rewards)) {
-                        $rewards[$rw["validator_index"]] += $rw["reward"];
+                        $rewards[$rw["validator_index"]] = bcadd($rw["reward"], $rewards[$rw["validator_index"]]);
                     } else {
                         $rewards[$rw["validator_index"]] = $rw["reward"];
                     }
@@ -259,11 +255,16 @@ abstract class BeaconValidatorRewardsAbstractModule extends CoreModule
         }
 
         $key_tes = 0;
+        $last_slot = max(array_keys($slots));
 
         foreach ($rewards_slots as $validator => $info) {
             $extra = "p";
             if ($slots[$info[0]] == 0) {
                 $extra = "om";
+            }
+            $effect = $info[1];
+            if($effect == "") {
+                $effect = "0";
             }
             $events[] = [
                 'block' => $epoch,
@@ -271,7 +272,7 @@ abstract class BeaconValidatorRewardsAbstractModule extends CoreModule
                 'sort_key' => $key_tes++,
                 'time' => date('Y-m-d H:i:s', $slots[$info[0]]),
                 'address' => $validator,
-                'effect' => $info[1],
+                'effect' => $effect,
                 'extra' => $extra
             ];
             $events[] = [
@@ -280,13 +281,10 @@ abstract class BeaconValidatorRewardsAbstractModule extends CoreModule
                 'sort_key' => $key_tes++,
                 'time' => date('Y-m-d H:i:s', $slots[$info[0]]),
                 'address' => "the-void",
-                'effect' => "-" . $info[1],
+                'effect' => "-" . $effect,
                 'extra' => $extra
             ];
         }
-
-        echo count($rewards);
-        // transaction null 
 
         $attestations = requester_single(
             $this->select_node(),
@@ -302,43 +300,43 @@ abstract class BeaconValidatorRewardsAbstractModule extends CoreModule
                 foreach ($attestations as $attestation) {
                     if (array_key_exists($attestation["validator_index"], $rewards)) {
                         // what to do with inclusion_delay that can be in data->total_rewards[i]
-                        $rewards[$attestation["validator_index"]] += ($attestation["head"] +
-                            $attestation["target"] +
-                            $attestation["source"]
+                        $rewards[$attestation["validator_index"]] = bcadd(
+                            bcadd(
+                                bcadd($attestation["head"], $attestation["target"]),
+                                $attestation["source"]
+                            ),
+                            $rewards[$attestation["validator_index"]]
                         );
                     } else {
-                        $rewards[$attestation["validator_index"]] = ($attestation["head"] +
-                            $attestation["target"] +
-                            $attestation["source"]);
+                        $rewards[$attestation["validator_index"]] =
+                        bcadd(
+                            bcadd($attestation["head"], $attestation["target"]),
+                            $attestation["source"]
+                        );
                     }
                 }
             }
         }
+        
 
-
-        // the need to check it still not working this part
         foreach($rewards as $validator => $reward) {
             $events[] = [
                 'block' => $epoch,
-                'transaction' => "", // number of block or null - for epoch
+                'transaction' => "",
                 'sort_key' => $key_tes++,
-                'time' => date('Y-m-d H:i:s', 123223456),
+                'time' => date('Y-m-d H:i:s', $slots[$last_slot]),
                 'address' => $validator,
                 'effect' => (string)$reward,
-                'failed' => false,
-                'extra' => "n", // proposing
-                'extra_indexed' => "n"
+                'extra' => "a"
             ];
             $events[] = [
                 'block' => $epoch,
                 'transaction' => "",
                 'sort_key' => $key_tes++,
-                'time' => date('Y-m-d H:i:s', 123223456),
+                'time' => date('Y-m-d H:i:s', $slots[$last_slot]),
                 'address' => "the-void",
-                'effect' => (string)($reward * -1), //string
-                'failed' => false, // 
-                'extra' => "n", //       delete from columns 
-                'extra_indexed' => "n" //
+                'effect' => (string)(bcmul($reward, "-1")),
+                'extra' => "a"
             ];
         }
 

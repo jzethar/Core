@@ -13,9 +13,7 @@ abstract class BeaconValidatorRewardsAbstractModule extends CoreModule
     public ?bool $hidden_values_only = false;
 
     public ?array $events_table_fields = ['block', 'transaction', 'sort_key', 'time', 'address', 'effect', 'extra'];
-    public ?array $events_table_nullable_fields = ['extra'];
-
-    public ?ExtraDataModel $extra_data_model = ExtraDataModel::Default;
+    public ?array $events_table_nullable_fields = ['transaction'];
 
     public ?bool $should_return_events = true;
     public ?bool $should_return_currencies = false;
@@ -25,10 +23,13 @@ abstract class BeaconValidatorRewardsAbstractModule extends CoreModule
     public ?bool $forking_implemented = true;
 
     public ?string $parent_root = null;
-    private static $events_prev = [];
-    private static $epoch_prev = 0;
 
-    private ?string $epoch = null;
+    public ?ExtraDataModel $extra_data_model = ExtraDataModel::Type;
+    public ?array $extra_data_details = [
+        "a" => "Attestation rewards",
+        "p" => "Proposer reward",
+        "o" => "Orphaned or missed block (no rewards for proposer)",
+    ];
 
     final public function pre_initialize()
     {
@@ -36,11 +37,8 @@ abstract class BeaconValidatorRewardsAbstractModule extends CoreModule
     }
 
     final public function post_post_initialize()
-    {
-        // if (is_null($this->workchain)) throw new DeveloperError("`workchain` is not set");
-    }
+    {}
 
-    // get number of fin epoch 
     public function inquire_latest_block()
     {
         $result = requester_single($this->select_node(), endpoint: 'eth/v1/beacon/headers', timeout: $this->timeout);
@@ -51,26 +49,17 @@ abstract class BeaconValidatorRewardsAbstractModule extends CoreModule
 
     private function get_header_slot($header)
     {
-        if (array_key_exists("data", $header)) {
+        if (isset($header["data"])) {
             $result = $header["data"];
             if (count($result) == 1) {
                 $result = $result[0];
-                if (array_key_exists("header", $result)) {
-                    $result = $result["header"];
-                    if (array_key_exists("message", $result)) {
-                        $result = $result["message"];
-                        if (array_key_exists("slot", $result)) {
-                            return (int)$result["slot"];
-                        }
-                    }
-                }
+                if (isset($result["header"]["message"]["slot"])) return (int)$result["header"]["message"]["slot"];
             }
         }
         throw new RequesterEmptyResponseException("get_header_slot(fields are changed)");
     }
+    
 
-
-    // merge all hashes of blocks in epoch 
     public function ensure_block($epoch, $break_on_first = false)
     {
         $hashes = [];
@@ -90,34 +79,36 @@ abstract class BeaconValidatorRewardsAbstractModule extends CoreModule
                     break;
             }
             try {
-                $curl_results = requester_multi($multi_curl, limit: 10, timeout: $this->timeout, valid_codes: [200, 404]);
-            } catch (RequesterException $e) {
-                throw new RequesterException("ensure_block(epoch: {$epoch}): no connection, previously: " . $e->getMessage());
+                $curl_results = requester_multi(
+                    $multi_curl,
+                    limit: envm($this->module, 'REQUESTER_THREADS'),
+                    timeout: $this->timeout,
+                    valid_codes: [200, 404]
+                );
+            } catch (Exception $e) {
+                throw new ModuleError("ensure_block(epoch: {$epoch}): no connection, previously: " . $e->getMessage());
             }
-            foreach($curl_results as $result) {
+            foreach($curl_results as $result) { 
                 $hash_result = requester_multi_process($result);
                 $root = "";
                 $slot = "";
-                if (array_key_exists("data", $hash_result)) {
-                    $hash_result = $hash_result["data"];
-                    if (array_key_exists("root", $hash_result)) {
-                        $root = $hash_result["root"];
-                    }
-                    if (array_key_exists("header", $hash_result)) {
-                        if (array_key_exists("message", $hash_result["header"])) {
-                            if (array_key_exists("slot", $hash_result["header"]["message"])) {
-                                $slot = $hash_result["header"]["message"]["slot"];
-                            } else {
-                                throw new RequesterEmptyResponseException("get_header_slot(fields are changed)");
-                            }
-                        } else {
-                            throw new RequesterEmptyResponseException("get_header_slot(fields are changed)");
-                        }
-                    } else {
-                        throw new RequesterEmptyResponseException("get_header_slot(fields are changed)");
-                    }
-                    $hashes_res[$slot] = $root;
+                if(isset($hash_result["data"]["root"])) {
+                    $root = $hash_result["data"]["root"];
                 }
+                if(isset($hash_result["code"])) {
+                    if($hash_result["code"] == "404") {
+                        continue;
+                    } else {
+                        $error = $hash_result["code"];
+                        throw new ModuleError("get_header_slot() error: {$error}");
+                    }
+                }
+                if(isset($hash_result["data"]["header"]["message"]["slot"])) {
+                    $slot = $hash_result["data"]["header"]["message"]["slot"];
+                } else {
+                    throw new ModuleError("get_header_slot(fields are changed)");
+                }
+                $hashes_res[$slot] = $root;
             }
             ksort($hashes_res);
             foreach($hashes_res as $slot => $hash) {
@@ -140,21 +131,16 @@ abstract class BeaconValidatorRewardsAbstractModule extends CoreModule
         $this->block_id = $epoch;
     }
 
-
     final public function pre_process_block($epoch)
     {
         $events = [];
         $rewards = [];
-        $rewards_slots = []; // key - validator, [key] - [slot, reward]
+        $rewards_slots = []; // key - validator, [key] -> [slot, reward]
         $rq_blocks = [];
         $rq_committees = [];
         $rq_blocks_data = [];
         $rq_committees_data = [];
         $rq_slot_time = [];
-        
-        if($epoch == static::$epoch_prev) {
-            return static::$events_prev;
-        }
 
         $proposers = requester_single(
             $this->select_node(),
@@ -167,6 +153,8 @@ abstract class BeaconValidatorRewardsAbstractModule extends CoreModule
                 $slots[$proposer["slot"]] = 0;
                 $rewards_slots[$proposer["validator_index"]] = [$proposer["slot"], ""];
             }
+        } else {
+            throw new ModuleError("pre_process_block(fields are changed)");
         }
 
         foreach($slots as $slot => $tm) {
@@ -174,32 +162,31 @@ abstract class BeaconValidatorRewardsAbstractModule extends CoreModule
         }
         $rq_slot_time_multi = requester_multi(
             $rq_slot_time,
-            10,
+            limit: envm($this->module, 'REQUESTER_THREADS'),
             timeout: $this->timeout,
             valid_codes: [200, 404],
         );
+
         foreach($rq_slot_time_multi as $slot) {
             $slot_info = requester_multi_process($slot, ignore_errors: true);
             if(array_key_exists("code", $slot_info)) {
                 $code = $slot_info["code"];
                 if($code == "404") {
                     continue;
+                } else {
+                    throw new ModuleError("pre_process_block() error: {$code}");
                 }
             } else {
-                if (array_key_exists("data", $slot_info)) {
-                    $data = $slot_info["data"];
-                    if (array_key_exists("message", $data)) {
-                        $data = $data["message"];
-                        $slot_id = $data["slot"];
-                        if (array_key_exists("execution_payload", $data["body"])) {
-                            $execution_payload = $data["body"]["execution_payload"];
-                            if (array_key_exists("timestamp", $execution_payload)) {
-                                $slots[$slot_id] = (int)$execution_payload["timestamp"];
-                            }
-                        }
-                        
-                    }
+                if (
+                    isset($slot_info["data"]["message"]["slot"]) &&
+                    isset($slot_info["data"]["message"]["body"]["execution_payload"]["timestamp"])
+                ) {
+                    $slot_id = $slot_info["data"]["message"]["slot"];
+                    $timestamp = (int)$slot_info["data"]["message"]["body"]["execution_payload"]["timestamp"];
+                } else {
+                    throw new ModuleError("pre_process_block(fields are changed)");
                 }
+                $slots[$slot_id] = $timestamp;
             }
         }
 
@@ -208,7 +195,7 @@ abstract class BeaconValidatorRewardsAbstractModule extends CoreModule
         }
         $rq_blocks_multi = requester_multi(
             $rq_blocks,
-            20,
+            limit: envm($this->module, 'REQUESTER_THREADS'),
             timeout: $this->timeout,
             valid_codes: [200, 404],
         );
@@ -225,7 +212,7 @@ abstract class BeaconValidatorRewardsAbstractModule extends CoreModule
         }
         $rq_committees_multi = requester_multi(
             $rq_committees,
-            20,
+            limit: envm($this->module, 'REQUESTER_THREADS'),
             timeout: $this->timeout,
             valid_codes: [200, 404],
         );
@@ -233,11 +220,20 @@ abstract class BeaconValidatorRewardsAbstractModule extends CoreModule
             $rq_committees_data[] = requester_multi_process($v, ignore_errors: true);
         }
 
-        foreach ($rq_blocks_data as $rq) {
-            if (array_key_exists("data", $rq)) {
-                $slot_rewards = $rq["data"];
-                $proposer_index = $slot_rewards["proposer_index"];
-                $rewards_slots[$proposer_index][1] = $slot_rewards["total"];
+         foreach ($rq_blocks_data as $rq) {
+            if (isset($rq["data"]["proposer_index"]) && isset($rq["data"]["total"])) {
+                $proposer_index = $rq["data"]["proposer_index"];
+                $rewards_slots[$proposer_index][1] = $rq["data"]["total"];
+            } else {
+                if(isset($rq["code"])) {
+                    if($rq["code"] == "404") {
+                        continue;
+                    } else {
+                        $error = $rq["code"];
+                        throw new ModuleError("get_header_slot() error: {$error}");
+                    }
+                }
+                throw new ModuleError("pre_process_block(fields are changed)");
             }
         }
 
@@ -246,9 +242,17 @@ abstract class BeaconValidatorRewardsAbstractModule extends CoreModule
                 $slot_rewards = $rq["data"];
                 foreach ($slot_rewards as $rw) {
                     if (array_key_exists($rw["validator_index"], $rewards)) {
-                        $rewards[$rw["validator_index"]] = bcadd($rw["reward"], $rewards[$rw["validator_index"]]);
+                        if(isset($rw["reward"]) && isset($rw["validator_index"])) {
+                            $rewards[$rw["validator_index"]] = bcadd($rw["reward"], $rewards[$rw["validator_index"]]);
+                        } else {
+                            throw new ModuleError("pre_process_block(fields are changed)");
+                        }
                     } else {
-                        $rewards[$rw["validator_index"]] = $rw["reward"];
+                        if(isset($rw["reward"]) && isset($rw["validator_index"])) {
+                            $rewards[$rw["validator_index"]] = $rw["reward"];
+                        } else {
+                            throw new ModuleError("pre_process_block(fields are changed)");
+                        }
                     }
                 }
             }
@@ -260,7 +264,7 @@ abstract class BeaconValidatorRewardsAbstractModule extends CoreModule
         foreach ($rewards_slots as $validator => $info) {
             $extra = "p";
             if ($slots[$info[0]] == 0) {
-                $extra = "om";
+                $extra = "o";
             }
             $effect = $info[1];
             if($effect == "") {
@@ -291,58 +295,55 @@ abstract class BeaconValidatorRewardsAbstractModule extends CoreModule
             endpoint: "eth/v1/beacon/rewards/attestations/{$epoch}",
             params: "[]",
             no_json_encode: true,
-            timeout: 6000
+            timeout: 1800
         );
 
-        if (array_key_exists("data", $attestations)) {
-            if (array_key_exists("total_rewards", $attestations["data"])) {
-                $attestations = $attestations["data"]["total_rewards"];
-                foreach ($attestations as $attestation) {
-                    if (array_key_exists($attestation["validator_index"], $rewards)) {
-                        // what to do with inclusion_delay that can be in data->total_rewards[i]
-                        $rewards[$attestation["validator_index"]] = bcadd(
-                            bcadd(
-                                bcadd($attestation["head"], $attestation["target"]),
-                                $attestation["source"]
-                            ),
-                            $rewards[$attestation["validator_index"]]
-                        );
-                    } else {
-                        $rewards[$attestation["validator_index"]] =
+        if (isset($attestations["data"]["total_rewards"])) {
+            $attestations = $attestations["data"]["total_rewards"];
+            foreach ($attestations as $attestation) {
+                if (array_key_exists($attestation["validator_index"], $rewards)) {
+                    $rewards[$attestation["validator_index"]] = bcadd(
                         bcadd(
                             bcadd($attestation["head"], $attestation["target"]),
                             $attestation["source"]
-                        );
-                    }
+                        ),
+                        $rewards[$attestation["validator_index"]]
+                    );
+                } else {
+                    $rewards[$attestation["validator_index"]] =
+                    bcadd(
+                        bcadd($attestation["head"], $attestation["target"]),
+                        $attestation["source"]
+                    );
                 }
             }
+        } else {
+            throw new ModuleError("pre_process_block(fields are changed)");
         }
         
 
         foreach($rewards as $validator => $reward) {
             $events[] = [
                 'block' => $epoch,
-                'transaction' => "",
+                'transaction' => null,
                 'sort_key' => $key_tes++,
                 'time' => date('Y-m-d H:i:s', $slots[$last_slot]),
                 'address' => $validator,
-                'effect' => (string)$reward,
+                'effect' => $reward,
                 'extra' => "a"
             ];
             $events[] = [
                 'block' => $epoch,
-                'transaction' => "",
+                'transaction' => null,
                 'sort_key' => $key_tes++,
                 'time' => date('Y-m-d H:i:s', $slots[$last_slot]),
                 'address' => "the-void",
-                'effect' => (string)(bcmul($reward, "-1")),
+                'effect' => (bcmul($reward, "-1")),
                 'extra' => "a"
             ];
         }
 
         $this->block_time = "0";
-        static::$events_prev = $events;
-        static::$epoch_prev = $epoch;
         $this->set_return_events($events);
     }
 

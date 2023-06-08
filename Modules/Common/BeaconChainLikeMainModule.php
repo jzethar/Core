@@ -18,8 +18,8 @@ abstract class BeaconChainLikeMainModule extends CoreModule
     public ?FeeRenderModel $fee_render_model = FeeRenderModel::None; // nikzh: комиссий тут нет
     public ?bool $hidden_values_only = false;
 
-    public ?array $events_table_fields = ['block', 'transaction', 'sort_key', 'time', 'address', 'effect', 'extra'];
-    public ?array $events_table_nullable_fields = ['transaction'];
+    public ?array $events_table_fields = ['block', 'transaction', 'sort_key', 'time', 'address', 'effect', 'extra', 'extra_indexed'];
+    public ?array $events_table_nullable_fields = ['transaction', 'extra_indexed'];
 
     public ?bool $should_return_events = true;
     public ?bool $should_return_currencies = false;
@@ -33,6 +33,8 @@ abstract class BeaconChainLikeMainModule extends CoreModule
         'a' => 'Attestation rewards',
         'p' => 'Proposer reward',
         'o' => 'Orphaned or missed block (no rewards for proposer)',
+        'w' => "Withdrawal",
+        'd' => "New deposit"
         // nikzh: где слешинг
     ];
 
@@ -125,6 +127,8 @@ abstract class BeaconChainLikeMainModule extends CoreModule
         $rq_blocks_data = [];
         $rq_committees_data = [];
         $rq_slot_time = [];
+        $withdrawals = []; // [i] -> [validator, address, amount, slot]
+        $deposits = []; // [i] -> [validator_index, address, amount, slot]
 
         $proposers = requester_single($this->select_node(),
             endpoint: "eth/v1/validator/duties/proposer/{$block}",
@@ -160,6 +164,26 @@ abstract class BeaconChainLikeMainModule extends CoreModule
             $timestamp = (int)$slot_info['data']['message']['body']['execution_payload']['timestamp'];
 
             $slots[$slot_id] = $timestamp;
+            $withdrawal = $slot_info['data']['message']['body']['execution_payload']["withdrawals"];
+            foreach ($withdrawal as $w) {
+                $withdrawals[] = [
+                    $w["validator_index"],
+                    $w["address"],
+                    $w["amount"],
+                    $slot_id
+                ];
+            }
+            $deposit = $slot_info['data']['message']['body']['deposits'];
+            foreach($deposit as $d) {
+                $pubkey = $d["data"]["pubkey"];
+                $address = $d["data"]["withdrawal_credentials"];
+                $amount = $d["data"]["amount"];
+                $index = requester_single($this->select_node(),
+                endpoint: "/eth/v1/beacon/states/{$slot_id}/validators/{$pubkey}",
+                timeout: $this->timeout,
+                result_in: 'data')["index"]; // Retrieve the latest slot number
+                $deposits[] = [$index, $address, $amount, $slot_id];
+            }
         }
 
         $this->block_time = date('Y-m-d H:i:s', $slots[max(array_keys($slots))]);
@@ -217,8 +241,55 @@ abstract class BeaconChainLikeMainModule extends CoreModule
 
         $key_tes = 0;
 
-        foreach ($rewards_slots as $validator => $info)
-        {
+        foreach ($withdrawals as $i => [$index, $address, $amount, $slot]) {
+            $events[] = [
+                'block' => $block,
+                'transaction' => $slot,
+                'sort_key' => $key_tes++,
+                'time' => $this->block_time,
+                'address' => 'the-void',
+                'effect' => '-' . $amount,
+                'extra' => 'w',
+                'extra_indexed' => $address
+            ];
+
+            $events[] = [
+                'block' => $block,
+                'transaction' => $slot,
+                'sort_key' => $key_tes++,
+                'time' => $this->block_time,
+                'address' => $index,
+                'effect' => $amount,
+                'extra' => 'w',
+                'extra_indexed' => $address
+            ];
+        }
+
+        foreach ($deposits as $i => [$index, $address, $amount, $slot]) {
+            $events[] = [
+                'block' => $block,
+                'transaction' => $slot,
+                'sort_key' => $key_tes++,
+                'time' => $this->block_time,
+                'address' => $index,
+                'effect' => '-' . $amount,
+                'extra' => 'd',
+                'extra_indexed' => $address
+            ];
+
+            $events[] = [
+                'block' => $block,
+                'transaction' => $slot,
+                'sort_key' => $key_tes++,
+                'time' => $this->block_time,
+                'address' => 'the-void',
+                'effect' => $amount,
+                'extra' => 'd',
+                'extra_indexed' => $address
+            ];
+        }
+
+        foreach ($rewards_slots as $validator => $info) {
             $extra = 'p';
 
             if ($slots[$info[0]] === 0)
@@ -237,6 +308,7 @@ abstract class BeaconChainLikeMainModule extends CoreModule
                 'address' => 'the-void',
                 'effect' => '-' . $effect,
                 'extra' => $extra,
+                'extra_indexed' => null
             ];
 
             $events[] = [
@@ -247,6 +319,7 @@ abstract class BeaconChainLikeMainModule extends CoreModule
                 'address' => $validator,
                 'effect' => $effect,
                 'extra' => $extra,
+                'extra_indexed' => null
             ];
         }
 
@@ -292,6 +365,7 @@ abstract class BeaconChainLikeMainModule extends CoreModule
                     'address' => 'the-void',
                     'effect' => $this_void,
                     'extra' => 'a',
+                    'extra_indexed' => null
                 ];
 
                 $events[] = [
@@ -301,7 +375,8 @@ abstract class BeaconChainLikeMainModule extends CoreModule
                     'time' => $this->block_time,
                     'address' => $validator,
                     'effect' => $reward,
-                    'extra' => 'a'
+                    'extra' => 'a',
+                    'extra_indexed' => null
                 ];
             }
             else
@@ -313,7 +388,8 @@ abstract class BeaconChainLikeMainModule extends CoreModule
                     'time' => $this->block_time,
                     'address' => $validator,
                     'effect' => $reward,
-                    'extra' => 'a'
+                    'extra' => 'a',
+                    'extra_indexed' => null
                 ];
 
                 $events[] = [
@@ -324,6 +400,7 @@ abstract class BeaconChainLikeMainModule extends CoreModule
                     'address' => 'the-void',
                     'effect' => $this_void,
                     'extra' => 'a',
+                    'extra_indexed' => null
                 ];
             }
         }

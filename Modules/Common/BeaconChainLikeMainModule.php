@@ -39,10 +39,7 @@ abstract class BeaconChainLikeMainModule extends CoreModule
         'sp' => "Reward for slashing proposer",
         'ap' => "Attestor penalty",
         'pp' => 'Proposer penalty'
-        // nikzh: где слешинг
     ];
-
-    private const WHISTLEBLOWER_REWARD_QUOTIENT = 512;
 
     private const ALTAIR_FORK_EPOCH = 74240;
     private const BELLATRIX_FORK_EPOCH = 144896;
@@ -51,7 +48,11 @@ abstract class BeaconChainLikeMainModule extends CoreModule
     private const MIN_SLASHING_PENALTY_QUOTIENT = 128;
     private const MIN_SLASHING_PENALTY_QUOTIENT_ALTAIR = 64;
     private const MIN_SLASHING_PENALTY_QUOTIENT_BELLATRIX = 32;
+    private const SLOT_PER_EPOCH = 32;
     
+    private const WHISTLEBLOWER_REWARD_QUOTIENT = 512;
+    private const WEIGHT_DENOMINATOR = 64;
+    private const PROPOSER_WEIGHT = 8;
 
     final public function pre_initialize()
     {
@@ -70,15 +71,15 @@ abstract class BeaconChainLikeMainModule extends CoreModule
             timeout: $this->timeout,
             result_in: 'data');
 
-        return intdiv((int)$result[0]['header']['message']['slot'], 32) - 2;
+        return intdiv((int)$result[0]['header']['message']['slot'], self::SLOT_PER_EPOCH) - 2;
     }
 
     public function ensure_block($block, $break_on_first = false) 
     {
         $hashes = [];
 
-        $block_start = $block * 32; 
-        $block_end = $block_start + 31;
+        $block_start = $block * self::SLOT_PER_EPOCH; 
+        $block_end = $block_start + (self::SLOT_PER_EPOCH - 1);
 
         foreach ($this->nodes as $node)
         {
@@ -145,7 +146,7 @@ abstract class BeaconChainLikeMainModule extends CoreModule
         }
         return false;
     }
-    // change slot amount to const 
+    
     private function ask4slashedValidators($attestationGroup = [], $slot = 'head')
     {
         $slashed_validators = [];
@@ -161,74 +162,32 @@ abstract class BeaconChainLikeMainModule extends CoreModule
 
         foreach ($rq_validator_info_multi as $v) {
             $slash_penalty = 0;
+            $reward = 0;
             $validator_info = requester_multi_process($v, result_in: 'data');
             if ($validator_info['validator']['slashed'] === true && !$this->checkIfValidatorSlashed($validator_info['index'], $slot)) {
 
-                if ((int)($slot / 32) > self::ALTAIR_FORK_EPOCH && (int)($slot / 32) < self::BELLATRIX_FORK_EPOCH) // it's altair epoch
+                if ((int)($slot / self::SLOT_PER_EPOCH) > self::ALTAIR_FORK_EPOCH && (int)($slot / self::SLOT_PER_EPOCH) < self::BELLATRIX_FORK_EPOCH) // it's altair fork
                 { 
+                    $reward = (int)(($validator_info['validator']['effective_balance'] / self::WHISTLEBLOWER_REWARD_QUOTIENT));
                     $slash_penalty = (int)($validator_info['validator']['effective_balance'] / self::MIN_SLASHING_PENALTY_QUOTIENT_ALTAIR);
                 }
-                if ((int)($slot / 32) > self::PHASE0_FORK_EPOCH && (int)($slot / 32) < self::ALTAIR_FORK_EPOCH)   // it's Phase0 epoch
+                if ((int)($slot / self::SLOT_PER_EPOCH) > self::PHASE0_FORK_EPOCH && (int)($slot / self::SLOT_PER_EPOCH) < self::ALTAIR_FORK_EPOCH)   // it's Phase0 fork
                 {
+                    $reward = (int)($validator_info['validator']['effective_balance'] / self::WHISTLEBLOWER_REWARD_QUOTIENT);
                     $slash_penalty = (int)($validator_info['validator']['effective_balance'] / self::MIN_SLASHING_PENALTY_QUOTIENT);
                 }
-                if((int)($slot / 32) >= self::BELLATRIX_FORK_EPOCH) // it's Bellatrix epoch and others
+                if((int)($slot / self::SLOT_PER_EPOCH) >= self::BELLATRIX_FORK_EPOCH) // it's Bellatrix fork and others
                 {
+                    $reward = (int)(($validator_info['validator']['effective_balance'] / self::WHISTLEBLOWER_REWARD_QUOTIENT));
                     $slash_penalty = (int)($validator_info['validator']['effective_balance'] / self::MIN_SLASHING_PENALTY_QUOTIENT_BELLATRIX);
                 }
-                $slashed_validators[$validator_info['index']] = strval($slash_penalty);
+                $slashed_validators[$validator_info['index']] = [strval($reward), strval($slash_penalty)];
             }
         }
         return $slashed_validators;
     }
 
-    // CAPELLA_FORK_EPOCH = 194048
-    //
-
-    // Phase 0
-    //
-    // MIN_SLASHING_PENALTY_QUOTIENT = 128 
-    // Phase0_FORK_EPOCH = 0
-    //
-    // decrease_balance(state, slashed_index, validator.effective_balance // MIN_SLASHING_PENALTY_QUOTIENT)
-    //
-    // if whistleblower_index is None:
-    //     whistleblower_index = proposer_index
-    // whistleblower_reward = Gwei(validator.effective_balance // WHISTLEBLOWER_REWARD_QUOTIENT)
-    // proposer_reward = Gwei(whistleblower_reward // PROPOSER_REWARD_QUOTIENT)
-    // increase_balance(state, proposer_index, proposer_reward)
-    // increase_balance(state, whistleblower_index, Gwei(whistleblower_reward - proposer_reward))
-
-    // Bellatrix
-    //
-    // MIN_SLASHING_PENALTY_QUOTIENT_BELLATRIX = 32
-    // BELLATRIX_FORK_EPOCH = 144896 // epoch
-    //
-    // slashing_penalty = validator.effective_balance // MIN_SLASHING_PENALTY_QUOTIENT_BELLATRIX  # [Modified in Bellatrix]
-    // decrease_balance(state, slashed_index, slashing_penalty)
-    //
-    // if whistleblower_index is None:
-    //     whistleblower_index = proposer_index
-    // whistleblower_reward = Gwei(validator.effective_balance // WHISTLEBLOWER_REWARD_QUOTIENT)
-    // proposer_reward = Gwei(whistleblower_reward * PROPOSER_WEIGHT // WEIGHT_DENOMINATOR)
-    // increase_balance(state, proposer_index, proposer_reward)
-    // increase_balance(state, whistleblower_index, Gwei(whistleblower_reward - proposer_reward))
-
-    // Altair
-    //
-    // MIN_SLASHING_PENALTY_QUOTIENT_ALTAIR = 64
-    // ALTAIR_FORK_EPOCH = 74240 // epoch
-    //
-    // decrease_balance(state, slashed_index, validator.effective_balance // MIN_SLASHING_PENALTY_QUOTIENT_ALTAIR)
-    //
-    // if whistleblower_index is None:
-    //     whistleblower_index = proposer_index
-    // whistleblower_reward = Gwei(validator.effective_balance // WHISTLEBLOWER_REWARD_QUOTIENT)
-    // proposer_reward = Gwei(whistleblower_reward * PROPOSER_WEIGHT // WEIGHT_DENOMINATOR)
-    // increase_balance(state, proposer_index, proposer_reward)
-    // increase_balance(state, whistleblower_index, Gwei(whistleblower_reward - proposer_reward))
-
-    final public function pre_process_block($block) // $block here is really an epoch number
+    final public function pre_process_block($block) // $block here is an epoch number
     {
         $events = [];
         $rewards = [];
@@ -237,11 +196,11 @@ abstract class BeaconChainLikeMainModule extends CoreModule
         $rq_blocks_data = [];
         $rq_committees_data = [];
         $rq_slot_time = [];
-        $withdrawals = []; // [i] -> [validator, address, amount, slot]
-        $deposits = []; // [i] -> [validator_index, address, amount, slot]
-        $attestors_slashing = []; // [validator] -> [[validator_index => penalty], slot, amount]
-        $proposers_slashing = []; // [validator] -> [[validator_index => penalty], slot, amount]
-        $rewards_slots = []; // [validator] -> [slot, reward]
+        $withdrawals = [];          // [i] -> [validator, address, amount, slot]
+        $deposits = [];             // [i] -> [validator_index, address, amount, slot]
+        $attestors_slashing = [];   // [validator] -> [[validator_index => penalty], slot, amount]
+        $proposers_slashing = [];   // [validator] -> [[validator_index => penalty], slot, amount]
+        $rewards_slots = [];        // [validator] -> [slot, reward]
         $slot_data = [];
 
         $proposers = requester_single($this->select_node(),
@@ -342,7 +301,36 @@ abstract class BeaconChainLikeMainModule extends CoreModule
             }
         }
 
-        $this->block_time = date('Y-m-d H:i:s', $slots[max(array_keys($slots))]);
+        if ($block < self::BELLATRIX_FORK_EPOCH) {
+            $lastSlot = max(array_keys($slots));
+            $lastSlot = requester_single(
+                $this->select_node(),
+                endpoint: "eth/v1/beacon/blocks/{$lastSlot}",
+                timeout: $this->timeout,
+                result_in: 'data',
+            );
+            $blockHash = $lastSlot['message']['body']['eth1_data']['block_hash'];
+            $executionLayers = envm($this->module, 'execution_layer_NODES');
+            $executionLayer = $executionLayers[array_rand($executionLayers)];
+            $timeOfLastBlock = requester_single(
+                $executionLayer,
+                endpoint: "",
+                params: ['jsonrpc' => '2.0', 'method' => 'eth_getBlockByHash', 'params' => ["{$blockHash}", false], 'id' => 0],
+                no_json_encode: false,
+                timeout: $this->timeout,
+                result_in: 'result'
+            );
+            $timeOfBlock = hexdec($timeOfLastBlock['timestamp']);
+            $slotsKeys = array_keys($slots);
+            foreach($slotsKeys as $key => $slot) {
+                if($slots[$slot] !== null) {
+                    $slots[$slot] = $timeOfBlock;
+                }
+            }
+            $this->block_time = date('Y-m-d H:i:s', hexdec($timeOfLastBlock['timestamp']));
+        } else {
+            $this->block_time = date('Y-m-d H:i:s', $slots[max(array_keys($slots))]);
+        }
 
         foreach ($slots as $slot => $tm)
             $rq_blocks[] = requester_multi_prepare($this->select_node(), endpoint: "eth/v1/beacon/rewards/blocks/{$slot}");
@@ -410,35 +398,34 @@ abstract class BeaconChainLikeMainModule extends CoreModule
         $key_tes = 0;
 
         foreach($attestors_slashing as $index => [$slashed, $slot, $reward]) {
-            $slashed_indexes = array_keys($slashed);
-            $events[] = [
-                'block' => $block,
-                'transaction' => $slot,
-                'sort_key' => $key_tes++,
-                'time' => $this->block_time,
-                'address' => 'the-void',
-                'effect' => '-' . $reward,
-                'extra' => 'sa',
-                'extra_indexed' => $slashed_indexes
-            ];
-
-            $events[] = [
-                'block' => $block,
-                'transaction' => $slot,
-                'sort_key' => $key_tes++,
-                'time' => $this->block_time,
-                'address' => $index,
-                'effect' => $reward,
-                'extra' => 'sa',
-                'extra_indexed' => $slashed_indexes
-            ];
-            foreach($slashed as $validator_index => $penalty) {    
+            foreach($slashed as $validator_index => [$rewardForSlash, $penalty]) {   
                 $events[] = [
                     'block' => $block,
                     'transaction' => $slot,
                     'sort_key' => $key_tes++,
                     'time' => $this->block_time,
-                    'address' => $validator_index,
+                    'address' => 'the-void',
+                    'effect' => '-' . $rewardForSlash,
+                    'extra' => 'sa',
+                    'extra_indexed' => (string)$validator_index
+                ];
+    
+                $events[] = [
+                    'block' => $block,
+                    'transaction' => $slot,
+                    'sort_key' => $key_tes++,
+                    'time' => $this->block_time,
+                    'address' => (string)$index,
+                    'effect' => $rewardForSlash,
+                    'extra' => 'sa',
+                    'extra_indexed' => (string)$validator_index
+                ]; 
+                $events[] = [
+                    'block' => $block,
+                    'transaction' => $slot,
+                    'sort_key' => $key_tes++,
+                    'time' => $this->block_time,
+                    'address' => (string)$validator_index,
                     'effect' => '-' . $penalty,
                     'extra' => 'ap',
                     'extra_indexed' => null
@@ -457,35 +444,34 @@ abstract class BeaconChainLikeMainModule extends CoreModule
         }
 
         foreach($proposer_slashings as $index => [$slashed, $slot, $reward]) {
-            $slashed_indexes = array_keys($slashed);
-            $events[] = [
-                'block' => $block,
-                'transaction' => $slot,
-                'sort_key' => $key_tes++,
-                'time' => $this->block_time,
-                'address' => 'the-void',
-                'effect' => '-' . $reward,
-                'extra' => 'sp',
-                'extra_indexed' => $slashed_indexes
-            ];
-
-            $events[] = [
-                'block' => $block,
-                'transaction' => $slot,
-                'sort_key' => $key_tes++,
-                'time' => $this->block_time,
-                'address' => $index,
-                'effect' => $reward,
-                'extra' => 'sp',
-                'extra_indexed' => $slashed_indexes
-            ];
-            foreach($slashed as $validator_index => $penalty) {    
+            foreach($slashed as $validator_index => [$rewardForSlash, $penalty]) {   
                 $events[] = [
                     'block' => $block,
                     'transaction' => $slot,
                     'sort_key' => $key_tes++,
                     'time' => $this->block_time,
-                    'address' => $validator_index,
+                    'address' => 'the-void',
+                    'effect' => '-' . $rewardForSlash,
+                    'extra' => 'sp',
+                    'extra_indexed' => (string)$validator_index
+                ];
+    
+                $events[] = [
+                    'block' => $block,
+                    'transaction' => $slot,
+                    'sort_key' => $key_tes++,
+                    'time' => $this->block_time,
+                    'address' => (string)$index,
+                    'effect' => $rewardForSlash,
+                    'extra' => 'sp',
+                    'extra_indexed' => (string)$validator_index
+                ]; 
+                $events[] = [
+                    'block' => $block,
+                    'transaction' => $slot,
+                    'sort_key' => $key_tes++,
+                    'time' => $this->block_time,
+                    'address' => (string)$validator_index,
                     'effect' => '-' . $penalty,
                     'extra' => 'pp',
                     'extra_indexed' => null
@@ -512,7 +498,7 @@ abstract class BeaconChainLikeMainModule extends CoreModule
                 'address' => 'the-void',
                 'effect' => '-' . $amount,
                 'extra' => 'w',
-                'extra_indexed' => $address
+                'extra_indexed' => (string)$address
             ];
 
             $events[] = [
@@ -520,10 +506,10 @@ abstract class BeaconChainLikeMainModule extends CoreModule
                 'transaction' => $slot,
                 'sort_key' => $key_tes++,
                 'time' => $this->block_time,
-                'address' => $index,
+                'address' => (string)$index,
                 'effect' => $amount,
                 'extra' => 'w',
-                'extra_indexed' => $address
+                'extra_indexed' => (string)$address
             ];
         }
 
@@ -533,10 +519,10 @@ abstract class BeaconChainLikeMainModule extends CoreModule
                 'transaction' => $slot,
                 'sort_key' => $key_tes++,
                 'time' => $this->block_time,
-                'address' => $index,
+                'address' => (string)$index,
                 'effect' => '-' . $amount,
                 'extra' => 'd',
-                'extra_indexed' => $address
+                'extra_indexed' => (string)$address
             ];
 
             $events[] = [
@@ -547,14 +533,14 @@ abstract class BeaconChainLikeMainModule extends CoreModule
                 'address' => 'the-void',
                 'effect' => $amount,
                 'extra' => 'd',
-                'extra_indexed' => $address
+                'extra_indexed' => (string)$address
             ];
         }
 
         foreach ($rewards_slots as $validator => $info) {
             $extra = 'p';
 
-            if ($slots[$info[0]] === 0)
+            if ($slots[$info[0]] === null)
                 $extra = 'o';
 
             $effect = $info[1];
@@ -562,7 +548,7 @@ abstract class BeaconChainLikeMainModule extends CoreModule
             if (is_null($effect))
                 $effect = '0';
 
-            $events[] = [ // nikzh: сначала минус, потом плюс
+            $events[] = [
                 'block' => $block,
                 'transaction' => $info[0],
                 'sort_key' => $key_tes++,
@@ -578,7 +564,7 @@ abstract class BeaconChainLikeMainModule extends CoreModule
                 'transaction' => $info[0],
                 'sort_key' => $key_tes++,
                 'time' => $this->block_time,
-                'address' => $validator,
+                'address' => (string)$validator,
                 'effect' => $effect,
                 'extra' => $extra,
                 'extra_indexed' => null
@@ -643,7 +629,7 @@ abstract class BeaconChainLikeMainModule extends CoreModule
                     'transaction' => null,
                     'sort_key' => $key_tes++,
                     'time' => $this->block_time,
-                    'address' => $validator,
+                    'address' => (string)$validator,
                     'effect' => $reward,
                     'extra' => 'a',
                     'extra_indexed' => null
@@ -656,7 +642,7 @@ abstract class BeaconChainLikeMainModule extends CoreModule
                     'transaction' => null,
                     'sort_key' => $key_tes++,
                     'time' => $this->block_time,
-                    'address' => $validator,
+                    'address' => (string)$validator,
                     'effect' => $reward,
                     'extra' => 'a',
                     'extra_indexed' => null

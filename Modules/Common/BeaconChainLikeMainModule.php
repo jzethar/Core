@@ -146,46 +146,7 @@ abstract class BeaconChainLikeMainModule extends CoreModule
         }
         return false;
     }
-    
-    private function ask4slashedValidators($attestationGroup = [], $slot = 'head')
-    {
-        $slashed_validators = [];
-        foreach ($attestationGroup as $at)
-            $rq_validator_info[] = requester_multi_prepare($this->select_node(), endpoint: "/eth/v1/beacon/states/{$slot}/validators/{$at}");
 
-        $rq_validator_info_multi = requester_multi(
-            $rq_validator_info,
-            limit: envm($this->module, 'REQUESTER_THREADS'),
-            timeout: $this->timeout,
-            valid_codes: [200],
-        );
-
-        foreach ($rq_validator_info_multi as $v) {
-            $slash_penalty = 0;
-            $reward = 0;
-            $validator_info = requester_multi_process($v, result_in: 'data');
-            if ($validator_info['validator']['slashed'] === true && !$this->checkIfValidatorSlashed($validator_info['index'], $slot)) {
-
-                if ((int)($slot / self::SLOT_PER_EPOCH) > self::ALTAIR_FORK_EPOCH && (int)($slot / self::SLOT_PER_EPOCH) < self::BELLATRIX_FORK_EPOCH) // it's altair fork
-                { 
-                    $reward = (int)(($validator_info['validator']['effective_balance'] / self::WHISTLEBLOWER_REWARD_QUOTIENT));
-                    $slash_penalty = (int)($validator_info['validator']['effective_balance'] / self::MIN_SLASHING_PENALTY_QUOTIENT_ALTAIR);
-                }
-                if ((int)($slot / self::SLOT_PER_EPOCH) > self::PHASE0_FORK_EPOCH && (int)($slot / self::SLOT_PER_EPOCH) < self::ALTAIR_FORK_EPOCH)   // it's Phase0 fork
-                {
-                    $reward = (int)($validator_info['validator']['effective_balance'] / self::WHISTLEBLOWER_REWARD_QUOTIENT);
-                    $slash_penalty = (int)($validator_info['validator']['effective_balance'] / self::MIN_SLASHING_PENALTY_QUOTIENT);
-                }
-                if((int)($slot / self::SLOT_PER_EPOCH) >= self::BELLATRIX_FORK_EPOCH) // it's Bellatrix fork and others
-                {
-                    $reward = (int)(($validator_info['validator']['effective_balance'] / self::WHISTLEBLOWER_REWARD_QUOTIENT));
-                    $slash_penalty = (int)($validator_info['validator']['effective_balance'] / self::MIN_SLASHING_PENALTY_QUOTIENT_BELLATRIX);
-                }
-                $slashed_validators[$validator_info['index']] = [strval($reward), strval($slash_penalty)];
-            }
-        }
-        return $slashed_validators;
-    }
 
     final public function pre_process_block($block) // $block here is an epoch number
     {
@@ -669,5 +630,45 @@ abstract class BeaconChainLikeMainModule extends CoreModule
         return requester_single($this->select_node(),
             endpoint: "eth/v1/beacon/states/head/validators/{$index}",
             timeout: $this->timeout)['data']['balance'];
+    }
+
+    private function ask4slashedValidators($attestationGroup = [], $slot = 'head')
+    {
+        $slashed_validators = [];
+        foreach ($attestationGroup as $at)
+            $rq_validator_info[] = requester_multi_prepare($this->select_node(), endpoint: "/eth/v1/beacon/states/{$slot}/validators/{$at}");
+
+        $rq_validator_info_multi = requester_multi(
+            $rq_validator_info,
+            limit: envm($this->module, 'REQUESTER_THREADS'),
+            timeout: $this->timeout,
+            valid_codes: [200],
+        );
+
+        foreach ($rq_validator_info_multi as $v) {
+            $slash_penalty = 0;
+            $reward = 0;
+            $validator_info = requester_multi_process($v, result_in: 'data');
+            if ($validator_info['validator']['slashed'] === true && !$this->checkIfValidatorSlashed($validator_info['index'], $slot)) {
+
+                if ((int)($slot / self::SLOT_PER_EPOCH) > self::ALTAIR_FORK_EPOCH && (int)($slot / self::SLOT_PER_EPOCH) < self::BELLATRIX_FORK_EPOCH) // it's altair fork
+                { 
+                    $reward = (int)(($validator_info['validator']['effective_balance'] / self::WHISTLEBLOWER_REWARD_QUOTIENT));
+                    $slash_penalty = (int)($validator_info['validator']['effective_balance'] / self::MIN_SLASHING_PENALTY_QUOTIENT_ALTAIR);
+                }
+                if ((int)($slot / self::SLOT_PER_EPOCH) > self::PHASE0_FORK_EPOCH && (int)($slot / self::SLOT_PER_EPOCH) < self::ALTAIR_FORK_EPOCH)   // it's Phase0 fork
+                {
+                    $reward = (int)($validator_info['validator']['effective_balance'] / self::WHISTLEBLOWER_REWARD_QUOTIENT);
+                    $slash_penalty = (int)($validator_info['validator']['effective_balance'] / self::MIN_SLASHING_PENALTY_QUOTIENT);
+                }
+                if((int)($slot / self::SLOT_PER_EPOCH) >= self::BELLATRIX_FORK_EPOCH) // it's Bellatrix fork and others
+                {
+                    $reward = (int)(($validator_info['validator']['effective_balance'] / self::WHISTLEBLOWER_REWARD_QUOTIENT));
+                    $slash_penalty = (int)($validator_info['validator']['effective_balance'] / self::MIN_SLASHING_PENALTY_QUOTIENT_BELLATRIX);
+                }
+                $slashed_validators[$validator_info['index']] = [strval($reward), strval($slash_penalty)];
+            }
+        }
+        return $slashed_validators;
     }
 }

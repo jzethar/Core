@@ -232,8 +232,8 @@ abstract class BeaconChainLikeMainModule extends CoreModule
             foreach($attester_slashings as $as) {
                 $attestation_1 = $as['attestation_1']['attesting_indices'];
                 $attestation_2 = $as['attestation_2']['attesting_indices'];
-                $slashed_1 = $this->ask4slashedValidators(attestationGroup: $attestation_1, slot: $slot_id);
-                $slashed_2 = $this->ask4slashedValidators(attestationGroup: $attestation_2, slot: $slot_id);
+                $slashed_1 = $this->ask_slashed_validators(attestationGroup: $attestation_1, slot: $slot_id);
+                $slashed_2 = $this->ask_slashed_validators(attestationGroup: $attestation_2, slot: $slot_id);
                 $slashed = $slashed_1 + $slashed_2;
                 if (count($slashed) > 0) {
                     if (isset($attestors_slashing[$proposer])) {
@@ -248,8 +248,8 @@ abstract class BeaconChainLikeMainModule extends CoreModule
             foreach($proposer_slashings as $as) {
                 $attestation_1 = $as['signed_header_1']["message"]['proposer_index'];
                 $attestation_2 = $as['signed_header_2']["message"]['proposer_index'];
-                $slashed_1 = $this->ask4slashedValidators(attestationGroup: [$attestation_1], slot: $slot_id);
-                $slashed_2 = $this->ask4slashedValidators(attestationGroup: [$attestation_2], slot: $slot_id);
+                $slashed_1 = $this->ask_slashed_validators(attestationGroup: [$attestation_1], slot: $slot_id);
+                $slashed_2 = $this->ask_slashed_validators(attestationGroup: [$attestation_2], slot: $slot_id);
                 $slashed = $slashed_1 + $slashed_2;
                 if (count($slashed) > 0) {
                     if (isset($proposers_slashing[$proposer])) {
@@ -632,7 +632,7 @@ abstract class BeaconChainLikeMainModule extends CoreModule
             timeout: $this->timeout)['data']['balance'];
     }
 
-    private function ask4slashedValidators($attestationGroup = [], $slot = 'head')
+    private function ask_slashed_validators($attestationGroup = [], $slot = 'head')
     {
         $slashed_validators = [];
         foreach ($attestationGroup as $at)
